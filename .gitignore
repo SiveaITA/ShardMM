@@ -1,0 +1,49 @@
+# Compiled source #
+###################
+*.dcu
+*.obj
+*.exe
+*.bpl
+*.bpi
+*.dcp
+*.rsm
+*.stat
+*.map
+
+# Generated source #
+###################
+*.hpp
+
+# Backup files    #
+###################
+*.~*
+
+# IDE Files	  #
+###################
+*.dproj.local
+*.groupproj.local
+*.identcache
+*.dsk
+*.dsv
+*.tvsconfig
+*.otares
+*.drc
+*.local
+*.ficfg
+
+# Output Folders  #
+###################
+/Win32
+/Win64
+/OSX32
+/Linux64
+Packages/Win32/
+Packages/Win64/
+Tests/Win64/
+/__history
+*.bak
+*.Patch
+*.#00
+*.pch
+.mdindex
+
