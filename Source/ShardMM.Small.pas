@@ -52,7 +52,7 @@ unit ShardMM.Small;
 
 interface
 
-{$R-}{$Q-}
+{$R-}{$Q-}{$INLINE ON}
 
 uses
   ShardMM.Segments;

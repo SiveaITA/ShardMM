@@ -7,7 +7,7 @@ unit ShardMM.Platform;
 
 interface
 
-{$R-}{$Q-}
+{$R-}{$Q-}{$INLINE ON}
 {$IF not (Defined(MSWINDOWS) and Defined(CPUX64))}
   {$MESSAGE FATAL 'ShardMM supports Win64 only'}
 {$IFEND}

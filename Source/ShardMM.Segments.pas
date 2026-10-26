@@ -16,7 +16,7 @@ unit ShardMM.Segments;
 
 interface
 
-{$R-}{$Q-}
+{$R-}{$Q-}{$INLINE ON}
 
 const
   SegmentShift = 22;

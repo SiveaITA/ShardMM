@@ -35,7 +35,7 @@ unit ShardMM.Medium;
 
 interface
 
-{$R-}{$Q-}
+{$R-}{$Q-}{$INLINE ON}
 
 uses
   ShardMM.Segments;

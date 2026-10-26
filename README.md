@@ -215,7 +215,11 @@ longer (81.7 against 75.3 ms).
 
 - Win64 only. Assembler: the fast paths, reading the TLS slot, `CAS128`, `Bsr` and `Bsf`; the rest is
   Pascal.
-- ShardMM takes one TLS slot and one FLS slot per process.
+- ShardMM takes one TLS slot and one FLS slot per process, and never frees the FLS slot: a DLL with
+  ShardMM must stay loaded while its threads run, or their exit calls the callback in unloaded code.
+- Every unit compiles with `{$INLINE ON}`: only routines marked `inline` are expanded, whatever the
+  inlining setting of the project. With `--inline:auto` the compiler would also try the error paths
+  inside inline routines and stop with hint H2445.
 - Blocks up to 16 KB are small, up to 1 MB medium, larger ones live in their own reservations, freed
   ones in the shared cache.
 - Classes of 2-8 KB go in steps of 12.5 %, 8-16 KB in steps of 25 %: a request of 2100 bytes takes 2304,

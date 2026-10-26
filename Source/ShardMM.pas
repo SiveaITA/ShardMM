@@ -32,7 +32,7 @@ unit ShardMM;
 
 interface
 
-{$R-}{$Q-}
+{$R-}{$Q-}{$INLINE ON}
 
 function ShardGetMem(aSize: NativeInt): Pointer;
 function ShardAllocMem(aSize: NativeInt): Pointer;

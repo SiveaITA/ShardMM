@@ -39,7 +39,7 @@ unit ShardMM.Large;
 
 interface
 
-{$R-}{$Q-}
+{$R-}{$Q-}{$INLINE ON}
 
 /// large block of at least aSize bytes
 function  LargeGetMem(aSize: NativeUInt): Pointer;
