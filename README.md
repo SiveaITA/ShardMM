@@ -377,6 +377,48 @@ Peak committed memory of the process at 8 threads, MB:
 - On one thread the memory manager is only a part of the work: the slowest of the four takes 5-36 %
   longer than the fastest, most in `interfaces` (500 small objects and as many closures per round).
 
+**Application workload on a server and a desktop** - the same benchmark on two more machines, with
+`AppBench.ps1 -Threads 1,4,8 -Runs 3` (median of three interleaved runs, threads not pinned): a
+production server, Intel Xeon Silver 4210 (10 cores, 2.2 GHz) with Windows Server 2016, measured while it
+was serving its own load, and a desktop, Intel Core i5-12500 (6 cores). Time of each manager relative to
+ShardMM (above 1 - slower than ShardMM), geometric mean over the scenarios without `pipeline`, the range
+over the scenarios in parentheses:
+
+| machine | threads | mimalloc | FastMM5 | RTL |
+|---|---:|---:|---:|---:|
+| Xeon Silver 4210 | 1 | 1.08 | 1.09 | 1.07 |
+| | 4 | 1.06 | 3.77 (2.72-5.21) | 5.57 |
+| | 8 | 1.06 | 5.07 (3.77-8.12) | 10.45 |
+| Core i5-12500 | 1 | 1.08 | 1.10 | 1.12 |
+| | 4 | 1.06 | 2.76 (1.72-4.61) | 5.00 |
+| | 8 | 1.04 | 3.73 (2.38-7.30) | 8.16 |
+
+The server at 8 threads, time, s:
+
+| scenario | ShardMM | mimalloc | FastMM5 | RTL |
+|---|---:|---:|---:|---:|
+| objects | 2.962 | 3.270 | 20.753 | 24.546 |
+| pack | 2.660 | 2.695 | 12.832 | 18.000 |
+| json | 2.886 | 2.987 | 12.539 | 20.375 |
+| strings | 3.528 | 3.641 | 13.298 | 23.926 |
+| maps | 3.537 | 3.683 | 14.349 | 25.361 |
+| interfaces | 1.942 | 2.058 | 15.773 | 13.945 |
+| pipeline | 1.703 | 1.709 | 5.873 | 60.080 |
+| mixed | 2.738 | 3.016 | 12.113 | 20.566 |
+| threads | 0.398 | 0.446 | 2.168 | 54.478 |
+
+- On the server ShardMM is at least as fast as mimalloc in every row (`pipeline` at 2 threads is a tie
+  within 0.2 %) and up to 12 % faster. On the desktop mimalloc is ahead by 2-5 % in `pack`, `maps` and
+  `interfaces` at 4 threads and in `pack` and `interfaces` at 8, and within 1 % in two more rows.
+- With the work per thread constant, the server keeps the time almost flat from 1 to 8 threads under
+  ShardMM and mimalloc (geometric mean of T(8)/T(1) 1.25 and 1.23), while FastMM5 takes 5.8 times and the
+  RTL manager 8.4 times as long: under RTL the eight threads run as if one after another. On the
+  six-core desktop eight threads share cores through Hyper-Threading, and ShardMM and mimalloc reach 1.8
+  and 1.7, FastMM5 6.1, RTL 8.2.
+- The peaks at 8 threads hardly depend on the machine: ShardMM has 75 MB in `pack`, 73 in `maps` and 30
+  in `mixed`, here as above, FastMM5 72, 59-65 and 18, mimalloc 152-164, 168-197 and 131-132.
+- The checksums agree across the four managers and both machines in all 216 rows.
+
 **Medium blocks** - a probe with 2000 live blocks and 2 million random replacements on one thread,
 median of two runs (Windows power mode "Balanced"): 64 KB - 1 MB - 559 ms, peak 1195 MB, 292 thousand
 page faults (mimalloc 2140 ms, 1481 MB, 282 thousand); 16-256 KB - 321 ms and 301 MB (mimalloc 440 ms

@@ -47,3 +47,12 @@ Tests/Win64/
 *.pch
 .mdindex
 
+# Project files the IDE creates for a .dpr: the programs build from the command line #
+###################
+*.dproj
+*.res
+
+# Third-party binaries: AppBench.ps1 builds mimalloc.dll or takes it with -MimallocDll #
+###################
+*.dll
+
