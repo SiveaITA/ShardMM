@@ -31,6 +31,7 @@ Source\ShardMM.Small.pas     small blocks, up to 16 KB
 Source\ShardMM.Medium.pas    medium blocks, up to 1 MB
 Source\ShardMM.Large.pas     large blocks and their cache
 Source\ShardMM.Platform.pas  Windows functions, CAS128, Bsr, Bsf
+Tests\ShardMMTests.dpr       deterministic tests of the documented behaviour
 Tests\ShardMMStress.dpr      multithreaded stress test that checks block contents
 Bench\AppBench.dpr           application-shaped workloads under ShardMM, mimalloc, FastMM5, RTL
 Bench\AppBench.ps1           builds the variants and runs them interleaved
@@ -290,54 +291,68 @@ Intel Core Ultra 7 356H, the process on the eight E-cores (affinity mask), Windo
 built for Windows with clang-cl, with `malloc`, `calloc`, `realloc`, `free` and `new`/`delete` of the
 tests redirected to a DLL per memory manager (for ShardMM it calls `ShardGetMem` and the others
 directly). Median of three runs; mimalloc 3.6.0, FastMM5 5.07, ucrt - the C runtime heap of Windows.
-Time, s (lower is better), and for larson, rptest, xmalloc-test and glibc-thread the "relative time"
-they print, as in mimalloc-bench:
+This table was taken with a power plan that keeps the minimum processor state at 100 %, the
+energy-performance preference at 0 and core parking off, turbo on. Time, s (lower is better), and for
+larson, rptest, xmalloc-test and glibc-thread the "relative time" they print, as in mimalloc-bench:
 
 | test | ucrt | mimalloc | ShardMM | FastMM5 |
 |---|---:|---:|---:|---:|
-| cfrac | 5.813 | 3.684 | 3.744 | 4.299 |
-| espresso | 4.931 | 3.888 | 3.882 | 4.088 |
-| barnes | 0.135 | 0.146 | 0.142 | 0.138 |
-| larsonN | 13.027 | 3.900 | 3.551 | 32.125 |
-| larsonN-sized | 13.122 | 4.012 | 3.666 | 31.935 |
-| alloc-test1 | 7.541 | 3.890 | 3.912 | 4.487 |
-| alloc-testN | 16.110 | 4.588 | 4.138 | 33.156 |
-| xmalloc-testN | 0.816 | 0.399 | 0.273 | 12.364 |
-| cache-thrash1 | 1.012 | 1.014 | 1.013 | 1.015 |
-| cache-thrashN | 0.168 | 0.156 | 0.161 | 0.187 |
-| cache-scratch1 | 1.012 | 1.013 | 1.013 | 1.015 |
-| cache-scratchN | 0.182 | 0.141 | 0.164 | 0.165 |
-| malloc-large | 5.588 | 2.151 | 2.167 | 5.580 |
-| mstressN | 0.888 | 0.408 | 0.453 | 0.614 |
-| mleak10 | 0.194 | 0.236 | 0.201 | 0.202 |
-| mleak100 | 1.886 | 2.292 | 1.985 | 2.000 |
-| rptestN | 0.847 | 0.323 | 0.309 | 0.548 |
-| glibc-simple | 4.104 | 1.126 | 1.081 | 1.801 |
-| glibc-thread | 5.792 | 1.244 | 1.313 | 55.261 |
+| cfrac | 5.810 | 3.667 | 3.743 | 4.268 |
+| espresso | 4.923 | 3.887 | 3.875 | 4.079 |
+| barnes | 0.140 | 0.143 | 0.141 | 0.142 |
+| larsonN | 12.690 | 3.950 | 3.613 | 31.467 |
+| larsonN-sized | 13.257 | 3.961 | 3.418 | 31.981 |
+| alloc-test1 | 7.479 | 3.890 | 3.914 | 4.439 |
+| alloc-testN | 14.304 | 3.941 | 3.888 | 32.263 |
+| xmalloc-testN | 0.791 | 0.363 | 0.250 | 12.220 |
+| cache-thrash1 | 1.012 | 1.013 | 1.013 | 1.015 |
+| cache-thrashN | 0.176 | 0.168 | 0.159 | 0.167 |
+| cache-scratch1 | 1.011 | 1.013 | 1.013 | 1.014 |
+| cache-scratchN | 0.155 | 0.176 | 0.159 | 0.196 |
+| malloc-large | 6.820 | 2.168 | 2.191 | 6.797 |
+| mstressN | 0.933 | 0.409 | 0.442 | 0.636 |
+| mleak10 | 0.178 | 0.222 | 0.193 | 0.194 |
+| mleak100 | 1.753 | 2.156 | 1.851 | 1.873 |
+| rptestN | 0.810 | 0.303 | 0.355 | 0.489 |
+| glibc-simple | 3.989 | 1.137 | 1.104 | 1.791 |
+| glibc-thread | 6.002 | 1.386 | 1.363 | 52.206 |
 
-Peak working set, MB, where the managers differ by more than 5 MB (4-9 MB for everyone in the other
-tests, 41-43 for barnes, 15-18 for alloc-test):
+Peak working set, MB, where the managers differ by more than 5 MB (4-8 MB for everyone in the other
+tests, 40-42 for barnes, 15-18 for alloc-test):
 
 | test | ucrt | mimalloc | ShardMM | FastMM5 |
 |---|---:|---:|---:|---:|
-| larsonN | 45 | 73 | 86 | 35 |
-| larsonN-sized | 45 | 75 | 91 | 36 |
-| xmalloc-testN | 46 | 68 | 84 | 11 |
-| malloc-large | 401 | 598 | 534 | 404 |
-| mstressN | 132 | 334 | 214 | 134 |
-| rptestN | 51 | 87 | 116 | 57 |
+| larsonN | 45 | 68 | 77 | 35 |
+| larsonN-sized | 48 | 73 | 77 | 35 |
+| xmalloc-testN | 46 | 68 | 89 | 11 |
+| malloc-large | 401 | 598 | 533 | 404 |
+| mstressN | 131 | 336 | 217 | 133 |
+| rptestN | 52 | 81 | 116 | 84 |
 | glibc-thread | 9 | 9 | 16 | 8 |
 
 - The geometric mean of the time ratios ShardMM / mimalloc over the 19 tests is 0.96. ShardMM is faster
-  in xmalloc-test by 32 %, in mleak by 13-15 %, in alloc-testN by 10 %, in larson by 9 %; slower in
-  mstress by 11 % (with 36 % less memory) and in glibc-thread by 6 %.
+  in xmalloc-test by 31 %, in mleak by 13-14 %, in larson by 9-14 %; slower in rptest by 17 % (see
+  below) and in mstress by 8 % (with 35 % less memory); within 3 % in the other tests except the
+  multithreaded Hoard tests (below).
 - larson also measures its own false sharing: the per-thread `thread_data` structures (464 bytes)
   lie back to back on the stack of the main thread, and the counters of neighbouring threads share
   cache lines. The cost depends on whether neighbouring threads land in the same cluster of E-cores,
   so larson varies by 5-10 % between runs. With `thread_data` aligned to 128 bytes larson runs 20 %
-  faster for every manager and varies by 0.5 %: ShardMM 2.699 s, mimalloc 2.965.
-- rptest is noisier than the rest: single runs of one manager differ by up to 20 % in time, and its
-  peak memory varies twofold between runs (mimalloc 76-167 MB, ShardMM 81-153 in six runs).
+  faster for every manager and varies by 0.5 % (an earlier build: ShardMM 2.699 s, mimalloc 2.965).
+- rptest is noisier than the rest: single runs of one manager differ by up to 20 % in time, and the
+  ratio to mimalloc of the same ShardMM code moves between days from 0.96 to 1.25. Its peak memory
+  varies twofold between runs (mimalloc 76-167 MB, ShardMM 81-153 in six runs).
+- The multithreaded false-sharing tests of Hoard (cache-thrashN, cache-scratchN, 0.15-0.21 s) measure
+  the scheduler rather than the memory manager. A context-switch trace gives every worker the same CPU
+  time in every run and with every manager, and no manager puts the objects of two threads into one
+  cache line. Now and then the Windows scheduler starts two of the eight workers on one E-core while
+  another E-core of the affinity mask sleeps (C2) and picks a thread up only 10-130 ms later; the two
+  take turns at quantum ends meanwhile. The time is that of the last worker, so it varies by up to 40 %
+  from run to run, with core parking off as well; with six threads on the eight cores it varies by
+  0.5 %.
+- glibc-simple depends on where the fast paths land in the code: the same build with `ShardGetMem`
+  moved by 16 bytes runs 2.5 % faster or slower on the E-cores, and the best position on the P-cores is a
+  different one. The other tests do not react to it.
 
 **XML workload** - `LX2Bench` of [LX2](https://github.com/apokroy/LX2) with libxml2 allocating through
 the Delphi memory manager, best of two runs, ms:
@@ -452,6 +467,36 @@ median of two runs (Windows power mode "Balanced"): 64 KB - 1 MB - 559 ms, peak 
 page faults (mimalloc 2140 ms, 1481 MB, 282 thousand); 16-256 KB - 321 ms and 301 MB (mimalloc 440 ms
 and 408 MB); 8-16 KB, small blocks - 80 ms (mimalloc 130 ms).
 
+## Deterministic tests
+
+`Tests\ShardMMTests.dpr`: fixed sizes in a fixed order, each test one documented behaviour. Every
+block is filled with the pattern of its own seed and checked later, so overlapping live blocks, a byte
+lost on a move and a stray write show up as a mismatch.
+
+- Size classes: one live block of every size from 1 byte to 16 KB at once, medium sizes at the
+  thresholds and in a sweep, large sizes at their thresholds; each block is 16-byte aligned and of the
+  kind and class its size calls for.
+- `AllocMem` on reused memory: freed dirty items of every class, medium chunks and cached large
+  blocks come back zeroed.
+- `ReallocMem`: the contents survive every pair of sizes from 1 byte to 20 MB, growth by one byte up
+  to 70000 and shrinking by halves; the in-place rules of small, medium and large blocks hold at their
+  exact boundaries.
+- Thread exit: blocks outlive their thread and are resized and freed by another one; frees into a heap
+  waiting in the stack of free heaps are drained by the next thread to take it, with every page and
+  arena left without items in use; memory goes back to the system after the reserve delay, and the
+  large-block cache empties after its delay.
+- Out of memory: sizes beyond the address space and 4 TB (reserved, then refused at commit) raise
+  `EOutOfMemory`, a block that was to be resized keeps its place and contents, and the manager keeps
+  working.
+
+The exit code is the number of failed checks. With `-DMM_RTL` the program runs on the RTL memory
+manager without the checks of ShardMM's own rules - a check of the tests themselves. A run takes
+about 4 seconds, two of them waiting for the one-second delays. Build:
+
+```
+dcc64 -B -Q -$O+ -NSSystem;Winapi;System.Win -U<Studio>\lib\win64\release;Source Tests\ShardMMTests.dpr
+```
+
 ## Stress test
 
 `Tests\ShardMMStress.dpr`: worker threads allocate, free, resize and hand blocks to each other; every
@@ -467,8 +512,9 @@ of the test itself). Build:
 dcc64 -B -Q -$O+ -NSSystem;Winapi;System.Win -U<Studio>\lib\win64\release;Source Tests\ShardMMStress.dpr
 ```
 
-Do not accept a change without a 30-second run on 8 and 16 threads without errors; a change to large
-blocks also needs `-large 10`, a change to medium blocks `-medium 100`.
+Do not accept a change without the deterministic tests passing and a 30-second run on 8 and 16
+threads without errors; a change to large blocks also needs `-large 10`, a change to medium blocks
+`-medium 100`.
 
 ## Application benchmark
 

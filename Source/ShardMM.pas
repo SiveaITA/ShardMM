@@ -428,6 +428,10 @@ begin
       Inc(grown, size shr 2)
     else
       Inc(grown, size shr 4);
+  // ShardGetMem takes a NativeInt: headroom that would carry the size beyond it is dropped, and a
+  // request that large fails on its own size
+  if grown > NativeUInt(High(NativeInt)) then
+    grown := size;
   Result := ShardGetMem(grown);
   if size < oldsize then
     oldsize := size;
