@@ -299,8 +299,13 @@ asm
   mov rax, [rdx + TSmallPage.FFree]
   test rax, rax
   jz GetMemSlow
-  mov r8, [rax]
-  mov [rdx + TSmallPage.FFree], r8
+  mov rcx, [rax]
+  mov [rdx + TSmallPage.FFree], rcx
+  // The next free item: the next allocation of this class reads its link, and the caller writes
+  // into it. Fetched now, with write intent, its line arrives while the caller works on this item;
+  // at the end of the list rcx is nil, and a prefetch never faults. The register is rcx and not
+  // r8-r15: dcc64 drops the REX prefix of prefetchw and would encode [r8] as [rax]
+  prefetchw [rcx]
   add qword ptr [rdx + TSmallPage.FUsed], 1
 end;
 
@@ -367,8 +372,8 @@ end;
 // the block moves, with headroom when growing: a quarter plus 32 bytes for small blocks, a quarter
 // for medium ones, 1/16 for large ones. Without the 32 bytes a short string appended character by
 // character moves to the next class on every step, and XPath over a libxml2 DOM (LX2Bench) runs 8 %
-// longer
-function ShardReallocMem(aMemory: Pointer; aSize: NativeInt): Pointer;
+// longer. A small block that stays in place never gets here: ShardReallocMem answers it
+function ReallocMemSlow(aMemory: Pointer; aSize: NativeInt): Pointer;
 var
   size, oldsize, grown: NativeUInt;
   heap: PThreadHeap;
@@ -428,6 +433,48 @@ begin
     oldsize := size;
   Move(aMemory^, Result^, oldsize);
   ShardFreeMem(aMemory);
+end;
+
+// Fast path: a small block whose new size stays within its class and not below a quarter of it
+// keeps its place, whichever thread owns it - nothing changes but the size the caller uses, and the
+// class of a page with a live item does not change. Everything else jumps to the slow path with the
+// same registers. A string appended a piece at a time and a dynamic array grown by one element come
+// here on every step, mostly within the class thanks to the headroom of the slow path
+function ShardReallocMem(aMemory: Pointer; aSize: NativeInt): Pointer;
+asm
+  .noframe
+  // nil and a size not above zero - the slow path allocates or frees
+  test rcx, rcx
+  jz ReallocMemSlow
+  test rdx, rdx
+  jle ReallocMemSlow
+  // segment map: not a small block - the slow path
+  mov rax, rcx
+  shr rax, 32
+  and eax, FastSegmentMapMask
+  lea r8, SegmentMap
+  mov r8, [r8 + rax * 8]
+  mov rax, rcx
+  shr rax, SegmentShift
+  and eax, FastSegmentKindsMask
+  cmp byte ptr [r8 + rax], SegmentKindSmall
+  jne ReallocMemSlow
+  // the page descriptor is Pages[(P - segment) shr SmallPageShift]; its FItemSize is the class
+  mov r8, rcx
+  and r8, FastSegmentMask
+  mov rax, rcx
+  sub rax, r8
+  shr rax, SmallPageShift
+  shl rax, FastPageDescShift
+  mov r9, [r8 + rax + TSmallPage.FItemSize]
+  // in place while Size <= ItemSize and Size + 64 >= ItemSize shr 2
+  cmp rdx, r9
+  ja ReallocMemSlow
+  lea rax, [rdx + 64]
+  shr r9, 2
+  cmp rax, r9
+  jb ReallocMemSlow
+  mov rax, rcx
 end;
 
 // Expected leaks are not tracked

@@ -21,6 +21,11 @@
 //               freed by another thread than the one that allocated them);
 //   mixed       request processing: parse JSON, look up a catalogue map, build an order, pack the
 //               response, log to a TStringBuilder;
+//   concat      text built by appending: words, an SQL column list with the trailing comma cut off,
+//               character by character, a binary packet grown by SetLength and Move (ReallocMem of
+//               strings, mostly within the size class of the block);
+//   arrays      dynamic arrays grown by one element (SetLength, A := A + [X], an array of records)
+//               and then shortened (ReallocMem of dynamic arrays);
 //   threads     waves of short-lived threads, each building and freeing 40 orders.
 //
 // The work per thread is constant, so N threads do N times the work. The time runs up to a barrier
@@ -63,12 +68,12 @@ uses
 
 type
   {$SCOPEDENUMS ON}
-  TScenario = (Objects, Pack, Json, Strings, Maps, Interfaces, Pipeline, Mixed, Threads);
+  TScenario = (Objects, Pack, Json, Strings, Maps, Interfaces, Pipeline, Mixed, Concat, Arrays, Threads);
   {$SCOPEDENUMS OFF}
 
 const
   ScenarioNames: array[TScenario] of string =
-    ('objects', 'pack', 'json', 'strings', 'maps', 'interfaces', 'pipeline', 'mixed', 'threads');
+    ('objects', 'pack', 'json', 'strings', 'maps', 'interfaces', 'pipeline', 'mixed', 'concat', 'arrays', 'threads');
 
   WordCount   = 1024;
   PackRows    = 20000;
@@ -134,6 +139,13 @@ type
     function Name: string;
   end;
 
+  // A row of the arrays scenario: a record with a managed field, copied by the array growth
+  TArrayRow = record
+    Id: Int64;
+    Name: string;
+    Amount: Double;
+  end;
+
   // Single-producer single-consumer queue between the threads of a pipeline pair
   TPipeRing = class
   public
@@ -175,6 +187,8 @@ type
     procedure RunProducer;
     procedure RunConsumer;
     procedure RunMixed;
+    procedure RunConcat;
+    procedure RunArrays;
   protected
     procedure Execute; override;
   public
@@ -597,6 +611,8 @@ begin
       else
         RunProducer;
     TScenario.Mixed:      RunMixed;
+    TScenario.Concat:     RunConcat;
+    TScenario.Arrays:     RunArrays;
   end;
 end;
 
@@ -1024,6 +1040,100 @@ begin
     end;
   finally
     Request.Free;
+  end;
+end;
+
+procedure TWorker.RunConcat;
+var
+  Text, Sql, Chars, Word: string;
+  Packet: RawByteString;
+  Round, I, J, Len: Integer;
+begin
+  for Round := 1 to System.Round(300000 * FScale) do
+  begin
+    // Words appended one by one, as a message or a report line is built
+    Text := '';
+    for I := 1 to 60 do
+      Text := Text + NextWord + ' ';
+
+    // An SQL column list: the trailing comma is cut off, then the rest of the statement follows
+    Sql := 'select ';
+    for I := 1 to 20 do
+      Sql := Sql + 'A.F' + IntToStr(I) + ', ';
+    SetLength(Sql, Length(Sql) - 2);
+    Sql := Sql + ' from T' + IntToStr(Round mod 50) + ' A where A.ID = ' + IntToStr(Round);
+
+    // Character by character, as a parser or an escaping routine builds its output
+    Word := NextWord;
+    Chars := '';
+    for I := 1 to 4 do
+      for J := 1 to Length(Word) do
+        Chars := Chars + Word[J];
+
+    // A binary packet grown by SetLength and Move, as a writer without a buffer of its own does
+    Packet := '';
+    for I := 1 to 40 do
+    begin
+      Len := Length(Packet);
+      SetLength(Packet, Len + SizeOf(Integer) + Length(Word) * SizeOf(Char));
+      PInteger(@Packet[Len + 1])^ := I;
+      Move(Pointer(Word)^, Packet[Len + 1 + SizeOf(Integer)], Length(Word) * SizeOf(Char));
+    end;
+
+    Mix(Length(Text));
+    MixText(Sql);
+    MixText(Chars);
+    Mix(Length(Packet));
+    Inc(Ops, 60 + 22 + 4 * Length(Word) + 40);
+  end;
+end;
+
+procedure TWorker.RunArrays;
+var
+  Ints: TArray<Integer>;
+  Keys: TArray<Int64>;
+  Names: TArray<string>;
+  Rows: TArray<TArrayRow>;
+  Round, I, Sum: Integer;
+begin
+  for Round := 1 to System.Round(90000 * FScale) do
+  begin
+    Ints := nil;
+    for I := 1 to 300 do
+    begin
+      SetLength(Ints, Length(Ints) + 1);
+      Ints[High(Ints)] := FRng.Below(1000);
+    end;
+
+    Keys := nil;
+    for I := 1 to 100 do
+      Keys := Keys + [Int64(Round) * 1000 + I];
+
+    Names := nil;
+    for I := 1 to 50 do
+      Names := Names + [NextWord];
+
+    Rows := nil;
+    for I := 1 to 50 do
+    begin
+      SetLength(Rows, Length(Rows) + 1);
+      Rows[High(Rows)].Id := I;
+      Rows[High(Rows)].Name := Names[I - 1];
+      Rows[High(Rows)].Amount := I * 1.5;
+    end;
+
+    // A filter keeps part of the elements: the arrays shrink in place
+    SetLength(Ints, Length(Ints) div 2);
+    SetLength(Rows, Length(Rows) div 3);
+
+    Sum := 0;
+    for I := 0 to High(Ints) do
+      Inc(Sum, Ints[I]);
+    Mix(Sum);
+    Mix(Keys[High(Keys)]);
+    MixText(Names[High(Names)]);
+    MixText(Rows[High(Rows)].Name);
+    Inc(Ops, 300 + 100 + 50 + 50);
   end;
 end;
 

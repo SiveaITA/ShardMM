@@ -38,13 +38,22 @@ unit ShardMM.Small;
      FThreadFree - other threads push freed items here, with one CAS.
    Allocation and freeing by the owner do no atomic operation at all.
 
-   The low bit of FThreadFree means "the page is queued at its owner" (FThreadFreePages). Another
-   thread sets it with the same CAS that pushes the item, and if the bit was clear, queues the page -
-   exactly once until the next drain. The owner clears the bit by exchanging FThreadFree for nil only
-   after taking the page from the queue, and drains the queue when a page runs out of items
+   FThreadFree is not a pointer but one word that describes the whole list: the offsets of its head
+   and of its tail in the page (bits 0-15 and 16-31: items lie at multiples of 16 bytes in a 64 KB
+   page) and the number of items (bits 32-63). The owner takes the list by exchanging the word for 0,
+   splices it into FLocalFree by the tail and subtracts the count from FUsed without walking it:
+   other threads have just written the items, and a walk would wait for a cache miss on every one. A
+   push computes the new word from the old one alone - the new item as the head, the same tail (the
+   new item when the list was empty), the count plus one - so a CAS that succeeds always describes the
+   list as it is, even if the owner took the list and other pushes brought the word back to the same
+   value in between.
+
+   A non-zero FThreadFree means "the page is queued at its owner" (FThreadFreePages): the push that
+   finds 0 queues the page - exactly once until the next drain. The owner exchanges FThreadFree for 0
+   only after taking the page from the queue, and drains the queue when a page runs out of items
    (AllocSlow); outside the queue the owner never reads FThreadFree. Hence the rule for releasing a
-   page: FUsed = 0 and FThreadFree = nil - no items in use, no other thread touches the page, and it
-   is not queued.
+   page: FUsed = 0 and FThreadFree = 0 - no items in use, no other thread touches the page, and it is
+   not queued.
 
    FUsed counts items handed out and not yet back in the owner's lists; an item freed by another
    thread but not yet drained counts as handed out. A double free of a small block goes undetected:
@@ -79,6 +88,11 @@ const
   /// SmallFreePagesCommitted (ExpirePoolReserve in ShardMM)
   SmallExitFreePages = 64;
 
+  /// FThreadFree: the head offset in bits 0-15, the tail offset in bits 16-31, the count above
+  SmallThreadFreeOffsetMask = SmallPageSize - 1;
+  SmallThreadFreeTailShift = 16;
+  SmallThreadFreeCountShift = 32;
+
   SmallClassSizes: array[0..SmallClassCount - 1] of Word = (16, 32, 64, 80, 96, 112, 128,
     160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048,
     2304, 2560, 2816, 3072, 3328, 3584, 3840, 4096, 4608, 5120, 5632, 6144, 6656, 7168, 7680, 8192,
@@ -111,8 +125,9 @@ type
     FBumpEnd: NativeUInt;
     FClass: PSmallClass;
 
-    /// items freed by other threads, and in the low bit "the page is queued at its owner"
-    FThreadFree: Pointer;
+    /// items freed by other threads: head, tail and count in one word; 0 - none, and the page is not
+    /// queued at its owner
+    FThreadFree: NativeUInt;
     /// next page in the owner's FThreadFreePages queue
     FNextNotified: PSmallPage;
     /// the owning heap; in descriptor 0 (the segment header) - the owner of the segment
@@ -133,7 +148,7 @@ type
     /// than one item has gathered, and it need not be unlinked and relinked for every item
     procedure LinkToTail;
     procedure Unlink;
-    procedure TakeFreed(aFirst: PSmallFreeItem);
+    procedure TakeFreed(aList: NativeUInt);
     /// an empty page goes to the heap's free pages; the last page of a class stays
     procedure ReleaseIfUnused;
   end;
@@ -274,31 +289,25 @@ begin
   FInList := 0;
 end;
 
-// The items of list aFirst move to FLocalFree
-procedure TSmallPage.TakeFreed(aFirst: PSmallFreeItem);
+// The items of aList, a value taken from FThreadFree, move to FLocalFree
+procedure TSmallPage.TakeFreed(aList: NativeUInt);
 var
-  last: PSmallFreeItem;
-  count: NativeInt;
+  first, last: PSmallFreeItem;
 begin
-  if aFirst = nil then
+  if aList = 0 then
     Exit;
-  count := 1;
-  last := aFirst;
-  while last.Next <> nil do
-  begin
-    last := last.Next;
-    Inc(count);
-  end;
+  first := PSmallFreeItem(FData + (aList and SmallThreadFreeOffsetMask));
+  last := PSmallFreeItem(FData + ((aList shr SmallThreadFreeTailShift) and SmallThreadFreeOffsetMask));
   last.Next := FLocalFree;
-  FLocalFree := aFirst;
-  Dec(FUsed, count);
+  FLocalFree := first;
+  Dec(FUsed, NativeInt(aList shr SmallThreadFreeCountShift));
   if FInList = 0 then
     LinkToTail;
 end;
 
 procedure TSmallPage.ReleaseIfUnused;
 begin
-  if (FUsed <> 0) or (FThreadFree <> nil) or
+  if (FUsed <> 0) or (FThreadFree <> 0) or
      ((FClass.FFirst = @Self) and (FNext = nil)) or (FClass.FFirst = nil) then
   begin
     if FInList = 0 then
@@ -312,17 +321,28 @@ end;
 
 procedure TSmallPage.ThreadFree(aMemory: Pointer);
 var
-  old: NativeUInt;
+  old, pushed, offset, base: NativeUInt;
   owner: PSmallHeap;
   head: PSmallPage;
 begin
+  offset := NativeUInt(aMemory) and SmallThreadFreeOffsetMask;
+  base := NativeUInt(aMemory) - offset;
   repeat
-    old := NativeUInt(FThreadFree);
-    PSmallFreeItem(aMemory).Next := PSmallFreeItem(old and not NativeUInt(1));
-  until AtomicCmpExchange(FThreadFree, Pointer(NativeUInt(aMemory) or 1), Pointer(old)) = Pointer(old);
+    old := FThreadFree;
+    if old = 0 then
+    begin
+      PSmallFreeItem(aMemory).Next := nil;
+      pushed := (NativeUInt(1) shl SmallThreadFreeCountShift) or (offset shl SmallThreadFreeTailShift) or offset;
+    end
+    else
+    begin
+      PSmallFreeItem(aMemory).Next := PSmallFreeItem(base + (old and SmallThreadFreeOffsetMask));
+      pushed := ((old + NativeUInt(1) shl SmallThreadFreeCountShift) and not NativeUInt(SmallThreadFreeOffsetMask)) or offset;
+    end;
+  until AtomicCmpExchange(FThreadFree, pushed, old) = old;
 
-  // the bit was clear: this thread, and only this one, queues the page at its owner
-  if old and 1 = 0 then
+  // the list was empty: this thread, and only this one, queues the page at its owner
+  if old = 0 then
   begin
     owner := FHeap;
     repeat
@@ -347,6 +367,33 @@ begin
     FHeap.FDirect[i] := direct;
 end;
 
+// The next batch of at most SmallCarveBatch items from the uncarved part of aPage, where at least one
+// item fits, linked in ascending address order. A function of its own and without calls: dcc64 keeps
+// the cursor, the item size and the limit in registers here, while in a function with calls it keeps
+// fields and parameters in memory and reloads them for every item
+function CarveBatch(aPage: PSmallPage; aItemSize: NativeUInt): PSmallFreeItem;
+var
+  item: PSmallFreeItem;
+  next, stop: NativeUInt;
+  count: Integer;
+begin
+  item := PSmallFreeItem(aPage.FBump);
+  // an item fits when it starts at or below stop
+  stop := aPage.FBumpEnd - aItemSize;
+  Result := item;
+  next := NativeUInt(item) + aItemSize;
+  count := SmallCarveBatch - 1;
+  while (count > 0) and (next <= stop) do
+  begin
+    item.Next := PSmallFreeItem(next);
+    item := PSmallFreeItem(next);
+    Inc(next, aItemSize);
+    Dec(count);
+  end;
+  item.Next := nil;
+  aPage.FBump := next;
+end;
+
 // Allocation when FFree of the first page of the class is empty: the foreign-free queue, the
 // page's local frees, carving, the next pages, a new page. A page where nothing was found leaves the
 // list, so the page found ends up first. FThreadFree of the pages is not read here: whatever other
@@ -355,8 +402,7 @@ end;
 function TSmallClass.AllocSlow: PSmallFreeItem;
 var
   page, next: PSmallPage;
-  item, last: PSmallFreeItem;
-  count: Integer;
+  item: PSmallFreeItem;
 begin
   // The queue of pages with foreign frees is drained here, when a page runs out of items, and not
   // on every allocation: while a page stays queued, further foreign frees into it are one CAS
@@ -376,23 +422,8 @@ begin
         page.FLocalFree := nil;
       end
       else if page.FBump + FItemSize <= page.FBumpEnd then
-      begin
-        // carve a batch in ascending address order: the next allocations take the fast path from FFree
-        count := 0;
-        last := nil;
-        while (count < SmallCarveBatch) and (page.FBump + FItemSize <= page.FBumpEnd) do
-        begin
-          item := PSmallFreeItem(page.FBump);
-          Inc(page.FBump, FItemSize);
-          if last = nil then
-            page.FFree := item
-          else
-            last.Next := item;
-          last := item;
-          Inc(count);
-        end;
-        last.Next := nil;
-      end
+        // carve a batch: the next allocations take the fast path from FFree
+        page.FFree := CarveBatch(page, FItemSize)
       else
       begin
         next := page.FNext;
@@ -455,7 +486,7 @@ begin
   page.FItemSize := aClass.FItemSize;
   page.FFree := nil;
   page.FLocalFree := nil;
-  page.FThreadFree := nil;
+  page.FThreadFree := 0;
   page.FNextNotified := nil;
   page.FUsed := 0;
   page.FBump := page.FData;
@@ -549,10 +580,10 @@ begin
   page := AtomicExchange(Pointer(FThreadFreePages), nil);
   while page <> nil do
   begin
-    // the link to the next one is read before the exchange: once the bit is cleared another thread
-    // may queue the page again and overwrite FNextNotified
+    // the link to the next one is read before the exchange: once FThreadFree is 0 another thread may
+    // queue the page again and overwrite FNextNotified
     next := page.FNextNotified;
-    page.TakeFreed(PSmallFreeItem(NativeUInt(AtomicExchange(page.FThreadFree, nil)) and not NativeUInt(1)));
+    page.TakeFreed(AtomicExchange(page.FThreadFree, 0));
     if page.FUsed = 0 then
       page.ReleaseIfUnused;
     page := next;

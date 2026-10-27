@@ -20,10 +20,13 @@ unit ShardMM.Medium;
 
    An arena belongs to the heap of one thread and never changes its owner: thread heaps pass to a new
    thread as a whole. A chunk freed by another thread is pushed with one CAS onto
-   TMediumArena.ThreadFree, whose low bit means "the arena is queued at its owner": the same protocol
-   as for small-block pages (ShardMM.Small), and the same rule: an empty arena leaves the bins only
-   when it has neither chunks in use nor pending foreign frees. The owner drains the queue at the
-   start of every medium-block operation, in the slow paths of ShardMM and when the thread exits.
+   TMediumArena.ThreadFree, whose low bit means "the arena is queued at its owner": the push that finds
+   the bit clear sets it and queues the arena, exactly once until the owner exchanges the list for nil.
+   The owner visits every chunk of the list anyway - each one is merged with its neighbours - so the
+   list is a plain pointer, not the head-tail-count word of small-block pages (ShardMM.Small). The rule
+   is the same as for pages: an empty arena leaves the bins only when it has neither chunks in use nor
+   pending foreign frees. The owner drains the queue at the start of every medium-block operation, in
+   the slow paths of ShardMM and when the thread exits.
 
    An empty arena (one free chunk over the whole arena) waits in EmptyArenas still committed: the next
    new arena is taken from there without page faults. The MediumEmptyArenasCommitted most recent ones

@@ -56,8 +56,8 @@ param(
     [ValidateSet('ShardMM', 'mimalloc', 'FastMM5', 'RTL')]
     [string[]]$Managers,
     [int[]]$Threads = @(1, 4, 16),
-    [ValidateSet('objects', 'pack', 'json', 'strings', 'maps', 'interfaces', 'pipeline', 'mixed', 'threads')]
-    [string[]]$Scenarios = @('objects', 'pack', 'json', 'strings', 'maps', 'interfaces', 'pipeline', 'mixed', 'threads'),
+    [ValidateSet('objects', 'pack', 'json', 'strings', 'maps', 'interfaces', 'pipeline', 'mixed', 'concat', 'arrays', 'threads')]
+    [string[]]$Scenarios = @('objects', 'pack', 'json', 'strings', 'maps', 'interfaces', 'pipeline', 'mixed', 'concat', 'arrays', 'threads'),
     [double]$Scale = 1,
     [ValidateRange(1, 99)]
     [int]$Runs = 1,

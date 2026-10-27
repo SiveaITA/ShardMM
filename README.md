@@ -67,7 +67,7 @@ Every unit starts with a comment on how its part works; this file is the overvie
 ### Foreign frees
 
 A small or medium block freed by another thread is pushed with one CAS onto the foreign-free list of
-its page or arena; the owner takes the whole list by exchanging it for nil. Pages and arenas never
+its page or arena; the owner takes the whole list with one exchange. Pages and arenas never
 change their owner - heaps are never freed, they pass to the next thread - so the owner recorded when
 a page or an arena was created is always valid. A large block belongs to no thread: any thread frees
 it directly.
@@ -99,17 +99,30 @@ it directly.
 - **Carving in ascending address order.** Objects created one after another get adjacent addresses,
   and walking them in the same order moves forward through memory, as the hardware prefetcher
   expects. Handing out a batch in reverse order cost XPath over a libxml2 DOM another 20 % (103 against
-  85 ms). The uncarved part of a page is cut in batches of 64 items.
+  85 ms). The uncarved part of a page is cut in batches of 64 items, by a function without calls:
+  there dcc64 keeps the cursor, the item size and the limit in registers. With the loop inside the
+  slow path it kept the cursor in the page descriptor and reloaded it for every item, and `objects`,
+  `pack` and `strings` of AppBench ran 1.5-2.3 % longer.
 - **Three free lists per page**, linked through the free items themselves: `FFree` - the owner
   allocates from it, `FLocalFree` - the owner puts freed items here, `FThreadFree` - other threads push
   freed items here. Allocation and freeing by the owner do no atomic operation at all.
-- **The queue bit in the same word.** The low bit of `FThreadFree` means "the page is queued at its
-  owner". Another thread sets it with the same CAS that pushes the item and, if the bit was clear,
-  queues the page - exactly once until the next drain. The owner clears the bit by exchanging the list
-  for nil only after taking the page from the queue. So a page goes back to the free pages only when
-  `FUsed = 0` and `FThreadFree = nil`: no items in use, no other thread touches it, and it is not
-  queued. A separate flag set by a second CAS after the push would not do: between the two operations
-  the owner may take the item and free the page, and the other thread then queues freed memory.
+- **The foreign-free list is one word.** `FThreadFree` is not a pointer: it holds the offsets of the
+  head and of the tail of the list in the page (items lie at multiples of 16 bytes in 64 KB, 16 bits
+  each) and the number of items. The owner takes the list by exchanging the word for 0, splices it
+  into `FLocalFree` by the tail and subtracts the count from `FUsed` without walking it. The items have
+  just been written by other threads, and a walk waits for a cache miss on every one of them: in
+  AppBench's `pipeline` (one thread packs messages, another unpacks and frees them) the walk took 9 %
+  of the time, and without it the scenario runs 13 % faster. A push computes the new word from the old
+  one alone - the new item as the head, the same tail (the new item when the list was empty), the
+  count plus one - so a CAS that succeeds always describes the list as it is, even if the owner took
+  the list and other pushes brought the word back to the same value in between: the ABA problem of a
+  lock-free stack comes from popping single items, and nobody does that here.
+- **A non-zero word means "the page is queued at its owner".** The push that finds 0 queues the
+  page - exactly once until the next drain; the owner exchanges the word for 0 only after taking the
+  page from the queue. So a page goes back to the free pages only when `FUsed = 0` and
+  `FThreadFree = 0`: no items in use, no other thread touches it, and it is not queued. A separate
+  flag set by a second CAS after the push would not do: between the two operations the owner may take
+  the item and free the page, and the other thread then queues freed memory.
 - **The queue is drained lazily**, when a page runs out of items rather than on every allocation:
   while a page stays queued, further foreign frees into it are one CAS without queueing. Outside the
   queue the owner never reads `FThreadFree`: the second line of the descriptor is not needed on the
@@ -128,8 +141,8 @@ it directly.
 ### Fast paths (`ShardMM`, `ShardMM.Small`)
 
 `ShardGetMem` and `ShardFreeMem` for a small block of the own thread are about fifteen instructions
-of assembler without calls and without a stack frame; everything else jumps to the slow path in Pascal
-with the same registers.
+of assembler without calls and without a stack frame, `ShardReallocMem` of a small block that keeps its
+place about twenty; everything else jumps to the slow path in Pascal with the same registers.
 
 - **A page per size** (`FDirect`, like `pages_free_direct` in mimalloc): the first page of the class by
   `(Size + 15) shr 4` for sizes up to 2 KB, and for a class without pages a shared empty page.
@@ -137,6 +150,19 @@ with the same registers.
   table and without a nil check. Only `TSmallClass.SetFirst`, the single place where the first page of
   a class changes, writes the array. Blocks of 2-16 KB are allocated through the class table: their
   pages hold few items, and `SetFirst` would rewrite dozens of array entries on every change.
+- **The next free item is prefetched.** Having taken an item, `ShardGetMem` issues `prefetchw` for
+  the next one: the next allocation of the class reads its link, and the caller writes into it. When
+  the items come back from another core (`pipeline` of AppBench) this saves 8-10 %; in the scenarios
+  of one thread the difference is within the noise. The next item is kept in `rcx`: dcc64 encodes
+  `prefetchw` with `r8`-`r15` without the REX prefix, so `[r8]` would become `[rax]`.
+- **A small block within its class is resized without leaving the fast path.** `ShardReallocMem`
+  looks the block up in the segment map, reads the class size from the page descriptor and returns
+  the same pointer while the new size is within the class and not below a quarter of it, whichever
+  thread owns the block: nothing changes but the size the caller uses, and the class of a page with a
+  live item does not change. A string appended a piece at a time and a dynamic array grown by one
+  element come here on every step, mostly within the class thanks to the headroom of growth
+  (`ReallocMem` below). In AppBench `concat` and `arrays` run 3.4-4.1 % faster with it and `pipeline`
+  1.6-2.1 %: the slow path builds a stack frame and looks the block up in the segment map twice.
 - **The segment owner lives in descriptor 0.** The "is this block mine" check of `ShardFreeMem`
   compares that pointer - a cache line nobody writes - rather than a field of the page descriptor the
   owner writes on every allocation.
@@ -164,8 +190,10 @@ Blocks from 16 KB to 1 MB.
 - **Resizing in place.** `ReallocMem` of a medium block of the own thread shrinks it by putting the
   tail into the free bins and grows it by taking the free chunk that follows.
 - **Foreign frees** - one CAS onto the `ThreadFree` list of the arena with the "queued at the owner"
-  bit in the same word: the same protocol and the same rule for an empty arena (no chunks in use, no
-  pending foreign frees) as for small-block pages.
+  bit in the low bit of the same word. The owner visits every chunk of the list anyway - each one is
+  merged with its neighbours - so the list is a plain pointer, not the head-tail-count word of
+  small-block pages; the rule for an empty arena (no chunks in use, no pending foreign frees) is the
+  same.
 - **An empty arena** is not returned to the system at once: the most recent one always stays
   committed, the others return all their memory except the first 64 KB after a second and wait until
   a new arena is needed - the addresses stay with them. When a thread exits, up to 4 of the most recent
@@ -203,13 +231,13 @@ Blocks above 1 MB.
 
 ### `ReallocMem`
 
-In place: a small block while the new size is within its class and not below a quarter of it; a
-medium block of the own thread - always when shrinking, and when growing if a free chunk follows; a
-large block - within its reservation (one shrunk by no more than half is left alone). Otherwise the
-block moves, with headroom when growing: a quarter plus 32 bytes for small blocks, a quarter for
-medium ones, 1/16 for large ones. Without the 32 bytes a short string appended character by character
-moves to the next class on every step (16 → 32 → 64 → 96 ...), and XPath over a libxml2 DOM ran 8 %
-longer (81.7 against 75.3 ms).
+In place: a small block while the new size is within its class and not below a quarter of it (the
+fast path, above); a medium block of the own thread - always when shrinking, and when growing if a
+free chunk follows; a large block - within its reservation (one shrunk by no more than half is left
+alone). Otherwise the block moves, with headroom when growing: a quarter plus 32 bytes for small
+blocks, a quarter for medium ones, 1/16 for large ones. Without the 32 bytes a short string appended
+character by character moves to the next class on every step (16 → 32 → 64 → 96 ...), and XPath over
+a libxml2 DOM ran 8 % longer (81.7 against 75.3 ms).
 
 ## Known behaviour
 
@@ -445,7 +473,7 @@ blocks also needs `-large 10`, a change to medium blocks `-medium 100`.
 ## Application benchmark
 
 `Bench\AppBench.dpr` measures memory managers under code shaped like business applications rather
-than bare `GetMem`/`FreeMem` loops. Nine scenarios, each per thread:
+than bare `GetMem`/`FreeMem` loops. Eleven scenarios, each per thread:
 
 | scenario | work |
 |---|---|
@@ -457,6 +485,8 @@ than bare `GetMem`/`FreeMem` loops. Nine scenarios, each per thread:
 | `interfaces` | 12 000 times: a list of 500 interface references and a closure per item |
 | `pipeline` | pairs of threads: one packs 300 000 messages, the other unpacks and frees them, so blocks are freed by another thread |
 | `mixed` | 200 000 requests: parse JSON, look up a catalogue map, build an order, pack the response, log to a `TStringBuilder` |
+| `concat` | 300 000 times: 60 words appended to a string one by one, an SQL list of 20 columns with the trailing comma cut off, a word appended character by character four times, a binary packet grown by `SetLength` and `Move` in 40 steps |
+| `arrays` | 90 000 times: an `Integer` array grown to 300 elements by `SetLength(A, Length(A) + 1)`, `Int64` to 100 by `A := A + [X]`, strings to 50, records with a string field to 50; then two of them shortened |
 | `threads` | 4000 short-lived threads in waves of N, each building and freeing 40 orders |
 
 The work per thread is constant. The time runs up to a barrier at which the threads still hold their
@@ -469,7 +499,8 @@ DOM are reproduced by the `AppBench.*` units without depending on it: the same i
 on the first read, an owning list being freed copies its items, the JSON writer is a 213 KB object
 zero-filled on every creation. Run side by side with the original under a memory manager that counts
 calls by size, AppBench makes the same number of `GetMem`, `AllocMem`, `ReallocMem` and `FreeMem`
-calls of every size in every scenario and produces the same checksums. Its code outside the memory
+calls of every size in every scenario and produces the same checksums (`concat` and `arrays` use only
+strings and dynamic arrays of the RTL and are the same code in both). Its code outside the memory
 manager is shorter: in the same interleaved run it took 6 % less time on average (11-20 % less under
 ShardMM and mimalloc in `pack`, `json` and `mixed`), the ShardMM / mimalloc ratios of the two
 differed by at most 4 %, and the FastMM5 / mimalloc and RTL / mimalloc ratios by -15 to +22 %.
